@@ -99,6 +99,16 @@ spec:
                   key: {{ include "apisix.admin.credentials.secretViewerKey" . }}
           {{- end }}
 
+          {{- if .Values.apisix.dataEncryption.secretName }}
+          {{- range $index, $key := .Values.apisix.dataEncryption.secretKeys }}
+            - name: APISIX_DATA_ENCRYPTION_KEY_{{ add1 $index }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.apisix.dataEncryption.secretName | quote }}
+                  key: {{ $key | quote }}
+          {{- end }}
+          {{- end }}
+
           {{- if or (and .Values.etcd.enabled .Values.etcd.auth.rbac.create) (and (not .Values.etcd.enabled) .Values.externalEtcd.user) }}
             - name: APISIX_ETCD_PASSWORD
               valueFrom:

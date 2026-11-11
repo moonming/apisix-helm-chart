@@ -123,6 +123,76 @@ With `etcd.auth.tls.enabled: false`, the APISIX etcd TLS settings and
 client-certificate mount are omitted as before. This flag does not rewrite
 external endpoint URLs; use `http://` endpoints for HTTP connections.
 
+## Data encryption
+
+APISIX encrypts sensitive plugin fields, such as the credentials of
+authentication plugins, before it stores them in etcd. It encrypts with the
+first key of `apisix.dataEncryption.keyring` and tries every key when it
+decrypts. Each key is 16 characters long (AES-128) or 32 characters long
+(AES-256), and is used as its own IV.
+
+When no keyring is set, APISIX uses its built-in keyring, `qeddd145sfvddff3`
+and `edd1c9f0985e76a2`. These keys are published in the APISIX source code, so
+anyone who can read etcd can decrypt the data. Set your own keyring, either in
+the values or in an existing Secret:
+
+```shell
+kubectl create secret generic apisix-keyring \
+  --from-literal=key1="$(LC_ALL=C tr -dc 'A-Za-z' </dev/urandom | head -c 16)"
+```
+
+```yaml
+apisix:
+  dataEncryption:
+    secretName: apisix-keyring
+    secretKeys:
+      - key1
+```
+
+The chart passes each key to APISIX as an environment variable,
+`APISIX_DATA_ENCRYPTION_KEY_1` for the first one and so on. With
+`apisix.fullCustomConfig`, the chart does not render `data_encryption`; refer to
+these variables in your own configuration instead, for example
+`keyring: ["${{"{{"}}APISIX_DATA_ENCRYPTION_KEY_1{{"}}"}}"]`. Until
+[apache/apisix#14178](https://github.com/apache/apisix/issues/14178) is fixed in
+the APISIX version you run, use keys that are not made of digits only: APISIX
+turns such a value from an environment variable into a number and refuses to
+start.
+
+The chart fails to render when the first key is one of the built-in keys. It
+cannot check keys in a Secret.
+
+Data that is already encrypted can only be decrypted with the key that
+encrypted it, so do not remove a key while data encrypted with it is still
+stored:
+
+- To move an existing release off the built-in keyring, put the new key first
+  and keep the built-in keys after it:
+
+  ```yaml
+  apisix:
+    dataEncryption:
+      keyring:
+        - "<new key>"
+        - qeddd145sfvddff3
+        - edd1c9f0985e76a2
+  ```
+
+  New data is encrypted with the new key, and the existing data stays
+  readable. APISIX does not re-encrypt stored data by itself, so save each
+  resource that holds encrypted fields again through the Admin API, for
+  example each consumer with credentials: a GET returns the fields decrypted,
+  and a PUT of the same resource encrypts them with the first key. Remove the
+  built-in keys only after that.
+- To rotate your own key, add the new key in front of the current one in the
+  same way, then remove the old key after the data is re-encrypted.
+
+Use the same keyring for every release that reads the same etcd, for example
+the control plane and the data plane of a decoupled deployment. Encryption only
+applies when APISIX reads its configuration from etcd. Set
+`apisix.dataEncryption.enableEncryptFields: false` to store the fields in plain
+text.
+
 ## Parameters
 
 {{ template "chart.valuesSection" . }}

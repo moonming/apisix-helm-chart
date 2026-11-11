@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+{{- include "apisix.dataEncryption.validate" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -108,6 +109,20 @@ data:
           count: {{ .Values.apisix.lru.secret.count }}
           neg_ttl: {{ .Values.apisix.lru.secret.neg_ttl }}
           neg_count: {{ .Values.apisix.lru.secret.neg_count }}
+
+      data_encryption:      # encryption of sensitive plugin fields stored in etcd
+        enable_encrypt_fields: {{ .Values.apisix.dataEncryption.enableEncryptFields }}
+        {{- if .Values.apisix.dataEncryption.secretName }}
+        keyring:
+          {{- range $index, $_ := .Values.apisix.dataEncryption.secretKeys }}
+          - ${{"{{"}}APISIX_DATA_ENCRYPTION_KEY_{{ add1 $index }}{{"}}"}}
+          {{- end }}
+        {{- else if .Values.apisix.dataEncryption.keyring }}
+        keyring:
+          {{- range .Values.apisix.dataEncryption.keyring }}
+          - {{ . | quote }}
+          {{- end }}
+        {{- end }}
 
       tracing: {{ .Values.apisix.tracing }}    # Enable comprehensive request lifecycle tracing (SSL/SNI, rewrite, access, header_filter, body_filter, and log).
                                                # When disabled, OpenTelemetry collects only a single span per request.
