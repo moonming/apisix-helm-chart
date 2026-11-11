@@ -56,9 +56,23 @@ render() { # render [helm args...]; sets OUT (manifests) and ERR (stderr), retur
   return $rc
 }
 
+# NOTES.txt is not part of `helm template` output, and `helm install --dry-run`
+# needs a reachable cluster with Helm 3. So render it from a copy of the chart
+# in which a ConfigMap template carries the rendered NOTES.txt.
+NOTES_CHART=$(mktemp -d)
+trap 'rm -rf "$NOTES_CHART"' EXIT
+cp -R "$CHART"/. "$NOTES_CHART"/
+{
+  printf '%s\n' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: rendered-notes' 'data:' \
+    '  notes: {{ include "test.renderedNotes" . | toJson }}' '{{- define "test.renderedNotes" }}'
+  cat "$CHART/templates/NOTES.txt"
+  printf '\n%s\n' '{{- end }}'
+} >"$NOTES_CHART/templates/zz-rendered-notes.yaml"
+
 notes() { # notes [helm args...]; sets NOTES to the rendered NOTES.txt
-  NOTES=$($HELM install apisix "$CHART" --namespace demo --dry-run=client "$@" 2>/dev/null | sed -n '/^NOTES:/,$p')
-  [ -n "$NOTES" ]
+  NOTES=$($HELM template apisix "$NOTES_CHART" --namespace demo --show-only templates/zz-rendered-notes.yaml "$@" 2>/dev/null |
+    yq '.data.notes')
+  [ -n "$NOTES" ] && [ "$NOTES" != null ] || { echo "       NOTES could not be rendered" >&2; return 1; }
 }
 
 config() { yq 'select(.kind == "ConfigMap" and .data["config.yaml"] != null) | .data["config.yaml"]' <<<"$OUT" | yq "$1"; }
@@ -75,8 +89,9 @@ fails_with() { # fails_with <message part> [helm args...]
   if render "$@"; then echo "       rendered without an error" >&2; return 1; fi
   grep -qF -- "$text" <<<"$ERR" || { echo "       error was: $ERR" >&2; return 1; }
 }
-warns() { grep -qF -- "$WARNING" <<<"$NOTES"; }
-does_not_warn() { ! warns; }
+warns() { notes "$@" && grep -qF -- "$WARNING" <<<"$NOTES"; }          # warns [helm args...]
+does_not_warn() { notes "$@" && ! grep -qF -- "$WARNING" <<<"$NOTES"; } # does_not_warn [helm args...]
+notes_say() { local text=$1; shift; notes "$@" && grep -qF -- "$text" <<<"$NOTES"; }
 
 # --- defaults: APISIX's built-in keyring, with a warning ------------------------
 
@@ -84,7 +99,6 @@ render
 check "default: encryption stays enabled" is "$(config '.apisix.data_encryption.enable_encrypt_fields')" true
 check "default: no keyring is rendered, APISIX keeps its built-in one" is "$(config '.apisix.data_encryption.keyring')" null
 check "default: no keyring environment variable" is "$(key_envs)" ""
-notes
 check "default: NOTES warns that the built-in keyring is public" warns
 
 # --- a keyring in the values ---------------------------------------------------
@@ -92,16 +106,14 @@ check "default: NOTES warns that the built-in keyring is public" warns
 render --set-json "apisix.dataEncryption.keyring=[\"$NEW\",\"$BUILTIN_1\",\"$BUILTIN_2\"]"
 check "inline: the keyring is rendered in order" is "$(config '.apisix.data_encryption.keyring | join(",")')" "$NEW,$BUILTIN_1,$BUILTIN_2"
 check "inline: the keys are quoted" grep -qF -- "- \"$NEW\"" <<<"$(config_text)"
-notes --set-json "apisix.dataEncryption.keyring=[\"$NEW\"]"
-check "inline: no warning about the built-in keyring" does_not_warn
+check "inline: no warning about the built-in keyring" does_not_warn --set-json "apisix.dataEncryption.keyring=[\"$NEW\"]"
 
 render --set-json 'apisix.dataEncryption.keyring=["1234567890123456"]'
 check "inline: a key made of digits stays a string" is "$(config '.apisix.data_encryption.keyring[0] | tag')" '!!str'
 
 render --set apisix.dataEncryption.enableEncryptFields=false
 check "disabled: enable_encrypt_fields is rendered false" is "$(config '.apisix.data_encryption.enable_encrypt_fields')" false
-notes --set apisix.dataEncryption.enableEncryptFields=false
-check "disabled: no warning about the built-in keyring" does_not_warn
+check "disabled: no warning about the built-in keyring" does_not_warn --set apisix.dataEncryption.enableEncryptFields=false
 
 # --- a keyring in an existing Secret -------------------------------------------
 
@@ -113,8 +125,7 @@ check "secret: config.yaml refers to the variable" is "$(config '.apisix.data_en
 render --set apisix.dataEncryption.secretName=apisix-keyring --set-json 'apisix.dataEncryption.secretKeys=["new","old"]'
 check "secret: one variable per key, in keyring order" is "$(env_ref APISIX_DATA_ENCRYPTION_KEY_1),$(env_ref APISIX_DATA_ENCRYPTION_KEY_2)" apisix-keyring/new,apisix-keyring/old
 check "secret: config.yaml lists the variables in the same order" is "$(config '.apisix.data_encryption.keyring | join(",")')" '${{APISIX_DATA_ENCRYPTION_KEY_1}},${{APISIX_DATA_ENCRYPTION_KEY_2}}'
-notes --set apisix.dataEncryption.secretName=apisix-keyring
-check "secret: no warning about the built-in keyring" does_not_warn
+check "secret: no warning about the built-in keyring" does_not_warn --set apisix.dataEncryption.secretName=apisix-keyring
 
 render --set apisix.fullCustomConfig.enabled=true --set apisix.dataEncryption.secretName=apisix-keyring
 check "secret with fullCustomConfig: the variable is still set for the custom config" is "$(env_ref APISIX_DATA_ENCRYPTION_KEY_1)" apisix-keyring/key1
@@ -137,18 +148,13 @@ check "fail: secretName without secretKeys" fails_with "apisix.dataEncryption.se
 
 # --- when the warning applies -----------------------------------------------------
 
-notes --set apisix.deployment.mode=standalone
-check "standalone (file): no warning, APISIX does not encrypt without etcd" does_not_warn
-notes --set apisix.deployment.role_traditional.config_provider=yaml --set etcd.enabled=false
-check "standalone (API): no warning, APISIX does not encrypt without etcd" does_not_warn
-notes --set apisix.fullCustomConfig.enabled=true
-check "fullCustomConfig: no warning, the custom config decides" does_not_warn
-notes --set apisix.deployment.mode=decoupled --set apisix.deployment.role=data_plane
-check "decoupled data plane: warns, it decrypts with the same keyring" warns
-notes --set apisix.deployment.mode=decoupled --set apisix.deployment.role=control_plane
-check "decoupled control plane: warns" warns
-notes --set-json 'apisix.data_encryption={"keyring":["AbCdEfGhIjKlMnOp"]}'
-check "the old apisix.data_encryption value: NOTES says it is not read" grep -qF "apisix.data_encryption is not read by this chart" <<<"$NOTES"
+check "standalone (file): no warning, APISIX does not encrypt without etcd" does_not_warn --set apisix.deployment.mode=standalone
+check "standalone (API): no warning, APISIX does not encrypt without etcd" does_not_warn --set apisix.deployment.role_traditional.config_provider=yaml --set etcd.enabled=false
+check "fullCustomConfig: no warning, the custom config decides" does_not_warn --set apisix.fullCustomConfig.enabled=true
+check "decoupled data plane: warns, it decrypts with the same keyring" warns --set apisix.deployment.mode=decoupled --set apisix.deployment.role=data_plane
+check "decoupled control plane: warns" warns --set apisix.deployment.mode=decoupled --set apisix.deployment.role=control_plane
+check "the old apisix.data_encryption value: NOTES says it is not read" \
+  notes_say "apisix.data_encryption is not read by this chart" --set-json 'apisix.data_encryption={"keyring":["AbCdEfGhIjKlMnOp"]}'
 
 echo
 echo "passed: $passed, failed: $failed"
