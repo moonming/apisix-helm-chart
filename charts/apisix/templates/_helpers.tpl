@@ -234,9 +234,18 @@ may follow it, so that data encrypted with them can still be decrypted.
 {{- if and $encryption.secretName (not $encryption.secretKeys) -}}
 {{- fail "apisix.dataEncryption.secretKeys must list the keys of the Secret that hold the keyring" -}}
 {{- end -}}
+{{- if and $encryption.keyring .Values.apisix.fullCustomConfig.enabled -}}
+{{- fail "apisix.dataEncryption.keyring is not used with apisix.fullCustomConfig: set data_encryption in apisix.fullCustomConfig.config, or use secretName and refer to the APISIX_DATA_ENCRYPTION_KEY_<n> variables there" -}}
+{{- end -}}
+{{- if and $encryption.keyring (not (kindIs "slice" $encryption.keyring)) -}}
+{{- fail "apisix.dataEncryption.keyring must be a list of keys" -}}
+{{- end -}}
 {{- range $index, $key := $encryption.keyring -}}
 {{- if not (kindIs "string" $key) -}}
 {{- fail (printf "apisix.dataEncryption.keyring: entry %d is not a string. Quote it, so that YAML keeps the key exactly as written" (add1 $index)) -}}
+{{- end -}}
+{{- if not (has (len $key) (list 16 32)) -}}
+{{- fail (printf "apisix.dataEncryption.keyring: entry %d is %d characters long; APISIX accepts keys of 16 or 32 characters" (add1 $index) (len $key)) -}}
 {{- end -}}
 {{- end -}}
 {{- if and $encryption.keyring (has (first $encryption.keyring) (include "apisix.dataEncryption.publicKeys" . | fromJsonArray)) -}}

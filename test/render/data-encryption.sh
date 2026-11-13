@@ -30,7 +30,7 @@ CHART=charts/apisix
 NEW=AbCdEfGhIjKlMnOp
 BUILTIN_1=qeddd145sfvddff3
 BUILTIN_2=edd1c9f0985e76a2
-WARNING="WARNING: APISIX encrypts sensitive plugin fields"
+WARNING="WARNING: APISIX encrypts SSL private keys and sensitive plugin fields"
 
 passed=0
 failed=0
@@ -59,7 +59,7 @@ render() { # render [helm args...]; sets OUT (manifests) and ERR (stderr), retur
 # NOTES.txt is not part of `helm template` output, and `helm install --dry-run`
 # needs a reachable cluster with Helm 3. So render it from a copy of the chart
 # in which a ConfigMap template carries the rendered NOTES.txt.
-NOTES_CHART=$(mktemp -d)
+NOTES_CHART=$(mktemp -d) || exit 2
 trap 'rm -rf "$NOTES_CHART"' EXIT
 cp -R "$CHART"/. "$NOTES_CHART"/
 {
@@ -113,7 +113,7 @@ check "inline: a key made of digits stays a string" is "$(config '.apisix.data_e
 
 check "disabled: renders" render --set apisix.dataEncryption.enableEncryptFields=false
 check "disabled: enable_encrypt_fields is rendered false" is "$(config '.apisix.data_encryption.enable_encrypt_fields')" false
-check "disabled: no warning about the built-in keyring" does_not_warn --set apisix.dataEncryption.enableEncryptFields=false
+check "disabled: still warns, SSL private keys are encrypted with the keyring" warns --set apisix.dataEncryption.enableEncryptFields=false
 
 # --- a keyring in an existing Secret -------------------------------------------
 
@@ -141,6 +141,15 @@ printf 'apisix:\n  dataEncryption:\n    keyring:\n      - %s\n      - 1234567890
 check "fail: an unquoted number in the keyring" fails_with "apisix.dataEncryption.keyring: entry 2 is not a string" -f "$values"
 check "fail: the error does not print the key" bash -c '! grep -qF 1234567890123456 <<<"$1"' _ "$ERR"
 rm -f "$values"
+check "fail: a keyring given as one string" fails_with "apisix.dataEncryption.keyring must be a list of keys" \
+  --set apisix.dataEncryption.keyring="$NEW"
+check "fail: that error does not print the key" bash -c '! grep -qF "$2" <<<"$1"' _ "$ERR" "$NEW"
+check "fail: a key that is not 16 or 32 characters long" fails_with "entry 2 is 15 characters long" \
+  --set-json "apisix.dataEncryption.keyring=[\"$NEW\",\"${NEW:0:15}\"]"
+check "fail: that error does not print the key" bash -c '! grep -qF "$2" <<<"$1"' _ "$ERR" "${NEW:0:15}"
+check "a 32-character key: renders" render --set-json "apisix.dataEncryption.keyring=[\"$NEW$NEW\"]"
+check "fail: an inline keyring with fullCustomConfig" fails_with "apisix.dataEncryption.keyring is not used with apisix.fullCustomConfig" \
+  --set apisix.fullCustomConfig.enabled=true --set-json "apisix.dataEncryption.keyring=[\"$NEW\"]"
 check "fail: keyring and secretName together" fails_with "set either keyring or secretName, not both" \
   --set-json "apisix.dataEncryption.keyring=[\"$NEW\"]" --set apisix.dataEncryption.secretName=apisix-keyring
 check "fail: secretName without secretKeys" fails_with "apisix.dataEncryption.secretKeys must list the keys" \

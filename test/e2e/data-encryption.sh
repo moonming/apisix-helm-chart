@@ -106,18 +106,17 @@ add_consumer() { # add_consumer <name> <key-auth key>
   created "$(admin_put /apisix/admin/consumers "$body")"
 }
 
-admin_get_key() { # admin_get_key <consumer>: the key-auth key as the Admin API returns it
+consumer_body() { # consumer_body <consumer>: the body to PUT it again, as the README describes:
+  # the GET response without the create_time and update_time fields, which a PUT rejects
   curl -s "http://127.0.0.1:$ADMIN_PORT/apisix/admin/consumers/$1" -H "X-API-KEY: $ADMIN_KEY" |
-    yq -p json '.value.plugins."key-auth".key'
+    yq -p json -o json -I0 '.value | del(.create_time, .update_time)'
 }
 
-resave_consumer() { # resave_consumer <consumer>: GET it and PUT it back without the
-  # create_time and update_time fields, which a PUT rejects, as the README describes
-  local body
-  body=$(curl -s "http://127.0.0.1:$ADMIN_PORT/apisix/admin/consumers/$1" -H "X-API-KEY: $ADMIN_KEY" |
-    yq -p json -o json -I0 '.value | del(.create_time, .update_time)')
-  created "$(admin_put /apisix/admin/consumers "$body")"
+holds_key() { # holds_key <body> <key-auth key>: the saved body has the decrypted key
+  is "$(yq -p json '.plugins."key-auth".key' <<<"$1")" "$2"
 }
+
+put_consumer() { created "$(admin_put /apisix/admin/consumers "$1")"; } # put_consumer <body>
 
 gateway_code() { # gateway_code <apikey>: status code of /e2e for that key
   curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GATEWAY_PORT/e2e" -H "apikey: $1"
@@ -126,7 +125,8 @@ gateway_code() { # gateway_code <apikey>: status code of /e2e for that key
 # accepts <apikey>: the gateway lets the key through. APISIX syncs from etcd in
 # the background, so wait for a consumer that was just added. Check rejects only
 # after an accepts on the same pods, so that the consumers are already synced.
-accepts() { wait_for 30 test "$(gateway_code "$1")" = 200; }
+gateway_accepts() { [ "$(gateway_code "$1")" = 200 ]; }
+accepts() { wait_for 30 gateway_accepts "$1"; }
 rejects() { is "$(gateway_code "$1")" 401; }
 is() { [ "$1" = "$2" ] || { echo "       expected '$2', got '$1'" >&2; return 1; }; }
 
@@ -143,6 +143,16 @@ decrypt() { # decrypt <key> <stored value>: AES-128-CBC with the key as its IV, 
     openssl enc -d -aes-128-cbc -K "$hex" -iv "$hex" 2>/dev/null
 }
 
+encrypt() { # encrypt <key> <plain text>: the value APISIX 3.19 stores
+  local hex
+  hex=$(printf '%s' "$1" | od -An -tx1 | tr -d ' \n')
+  printf '%s' "$2" | openssl enc -aes-128-cbc -K "$hex" -iv "$hex" | openssl base64 -A
+}
+
+misreads() { # misreads <key tried first> <key that encrypted> <plain text>
+  decrypt "$1" "$(encrypt "$2" "$3")" >/dev/null
+}
+
 not_encrypted_with() { # not_encrypted_with <namespace> <consumer> <key> <plain text>
   [ "$(decrypt "$3" "$(stored_key "$1" "$2")")" != "$4" ]
 }
@@ -153,6 +163,15 @@ encrypted_with() { # encrypted_with <namespace> <consumer> <key> <plain text>
   [ -n "$stored" ] && [ "$stored" != "$4" ] || { echo "       stored in clear text: '$stored'" >&2; return 1; }
   [ "$(decrypt "$3" "$stored")" = "$4" ] || { echo "       '$stored' does not decrypt with that key" >&2; return 1; }
 }
+
+# A wrong key passes the padding check of AES-CBC for about one value in 256, and
+# APISIX then uses the garbage it decrypts (see the README). Draw keys that do not
+# do that to the values this test stores, so that the test does not fail at random.
+while misreads "$KEY_2" "$KEY_1" jack-key || misreads "$KEY_1" "$BUILTIN_KEY" old-key ||
+      misreads "$KEY_1" "$BUILTIN_KEY" stale-key; do
+  KEY_1=$(random_letters 16)
+  KEY_2=$(random_letters 16)
+done
 
 new_namespace() { NAMESPACES+=("$1"); kubectl create namespace "$1" >/dev/null; }
 
@@ -201,14 +220,15 @@ check "built-in: route created" add_route
 check "built-in: consumer old created" add_consumer old old-key
 check "built-in: consumer stale created" add_consumer stale stale-key
 check "built-in: by default the data is encrypted with the public built-in key" encrypted_with "$NS" old "$BUILTIN_KEY" old-key
+OLD_BODY=$(consumer_body old)
+check "built-in: the body saved before the change holds the decrypted key" holds_key "$OLD_BODY" old-key
 
 check "migration: the upgrade with a new key first and the built-in key after it succeeds" \
   upgrade "$NS" --set-json "apisix.dataEncryption.keyring=[\"$KEY_1\",\"$BUILTIN_KEY\"]"
 check "migration: connected to the new pods" connect "$NS"
 check "migration: the old consumers still work" accepts old-key
 check "migration: the old consumers still work (stale)" accepts stale-key
-check "migration: a GET of the Admin API returns the key decrypted" is "$(admin_get_key old)" old-key
-check "migration: consumer old saved again with what the GET returned" resave_consumer old
+check "migration: consumer old saved again from the body saved before the change" put_consumer "$OLD_BODY"
 check "migration: old is now encrypted with the new key" encrypted_with "$NS" old "$KEY_1" old-key
 check "migration: consumer new created" add_consumer new new-key
 check "migration: new data is encrypted with the new key" encrypted_with "$NS" new "$KEY_1" new-key

@@ -20,13 +20,13 @@
   kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8080:80
 {{- end }}
 {{- $encryption := .Values.apisix.dataEncryption }}
-{{- if and (not .Values.apisix.fullCustomConfig.enabled) $encryption.enableEncryptFields (not $encryption.keyring) (not $encryption.secretName) (eq (include "apisix.deployment.configProvider" .) "etcd") }}
+{{- if and (not .Values.apisix.fullCustomConfig.enabled) (not $encryption.keyring) (not $encryption.secretName) (eq (include "apisix.deployment.configProvider" .) "etcd") }}
 
-WARNING: APISIX encrypts sensitive plugin fields, such as consumer credentials,
-with its built-in keyring, which is public. Set apisix.dataEncryption.keyring or
-apisix.dataEncryption.secretName. If this release already stores encrypted data,
-keep the built-in keys after the new key, as the "Data encryption" section of the
-chart README describes; otherwise APISIX can no longer decrypt that data.
+WARNING: APISIX encrypts SSL private keys and sensitive plugin fields, such as
+consumer credentials, with its built-in keyring, which is public. Set
+apisix.dataEncryption.secretName or apisix.dataEncryption.keyring. If this
+release already stores encrypted data, follow "Changing the keyring of an
+existing release" in the chart README; otherwise APISIX can lose that data.
 {{- end }}
 {{- if hasKey .Values.apisix "data_encryption" }}
 
