@@ -95,7 +95,7 @@ notes_say() { local text=$1; shift; notes "$@" && grep -qF -- "$text" <<<"$NOTES
 
 # --- defaults: APISIX's built-in keyring, with a warning ------------------------
 
-render
+check "default: renders" render
 check "default: encryption stays enabled" is "$(config '.apisix.data_encryption.enable_encrypt_fields')" true
 check "default: no keyring is rendered, APISIX keeps its built-in one" is "$(config '.apisix.data_encryption.keyring')" null
 check "default: no keyring environment variable" is "$(key_envs)" ""
@@ -103,31 +103,31 @@ check "default: NOTES warns that the built-in keyring is public" warns
 
 # --- a keyring in the values ---------------------------------------------------
 
-render --set-json "apisix.dataEncryption.keyring=[\"$NEW\",\"$BUILTIN_1\",\"$BUILTIN_2\"]"
+check "inline: renders" render --set-json "apisix.dataEncryption.keyring=[\"$NEW\",\"$BUILTIN_1\",\"$BUILTIN_2\"]"
 check "inline: the keyring is rendered in order" is "$(config '.apisix.data_encryption.keyring | join(",")')" "$NEW,$BUILTIN_1,$BUILTIN_2"
 check "inline: the keys are quoted" grep -qF -- "- \"$NEW\"" <<<"$(config_text)"
 check "inline: no warning about the built-in keyring" does_not_warn --set-json "apisix.dataEncryption.keyring=[\"$NEW\"]"
 
-render --set-json 'apisix.dataEncryption.keyring=["1234567890123456"]'
+check "inline, digits only: renders" render --set-json 'apisix.dataEncryption.keyring=["1234567890123456"]'
 check "inline: a key made of digits stays a string" is "$(config '.apisix.data_encryption.keyring[0] | tag')" '!!str'
 
-render --set apisix.dataEncryption.enableEncryptFields=false
+check "disabled: renders" render --set apisix.dataEncryption.enableEncryptFields=false
 check "disabled: enable_encrypt_fields is rendered false" is "$(config '.apisix.data_encryption.enable_encrypt_fields')" false
 check "disabled: no warning about the built-in keyring" does_not_warn --set apisix.dataEncryption.enableEncryptFields=false
 
 # --- a keyring in an existing Secret -------------------------------------------
 
-render --set apisix.dataEncryption.secretName=apisix-keyring
+check "secret: renders" render --set apisix.dataEncryption.secretName=apisix-keyring
 check "secret: one key by default" is "$(key_envs)" APISIX_DATA_ENCRYPTION_KEY_1
 check "secret: it reads the key key1" is "$(env_ref APISIX_DATA_ENCRYPTION_KEY_1)" apisix-keyring/key1
 check "secret: config.yaml refers to the variable" is "$(config '.apisix.data_encryption.keyring | join(",")')" '${{APISIX_DATA_ENCRYPTION_KEY_1}}'
 
-render --set apisix.dataEncryption.secretName=apisix-keyring --set-json 'apisix.dataEncryption.secretKeys=["new","old"]'
+check "secret with two keys: renders" render --set apisix.dataEncryption.secretName=apisix-keyring --set-json 'apisix.dataEncryption.secretKeys=["new","old"]'
 check "secret: one variable per key, in keyring order" is "$(env_ref APISIX_DATA_ENCRYPTION_KEY_1),$(env_ref APISIX_DATA_ENCRYPTION_KEY_2)" apisix-keyring/new,apisix-keyring/old
 check "secret: config.yaml lists the variables in the same order" is "$(config '.apisix.data_encryption.keyring | join(",")')" '${{APISIX_DATA_ENCRYPTION_KEY_1}},${{APISIX_DATA_ENCRYPTION_KEY_2}}'
 check "secret: no warning about the built-in keyring" does_not_warn --set apisix.dataEncryption.secretName=apisix-keyring
 
-render --set apisix.fullCustomConfig.enabled=true --set apisix.dataEncryption.secretName=apisix-keyring
+check "secret with fullCustomConfig: renders" render --set apisix.fullCustomConfig.enabled=true --set apisix.dataEncryption.secretName=apisix-keyring
 check "secret with fullCustomConfig: the variable is still set for the custom config" is "$(env_ref APISIX_DATA_ENCRYPTION_KEY_1)" apisix-keyring/key1
 
 # --- values that cannot work -----------------------------------------------------

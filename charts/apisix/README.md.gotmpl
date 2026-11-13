@@ -155,9 +155,10 @@ The chart passes each key to APISIX as an environment variable,
 these variables in your own configuration instead, for example
 `keyring: ["${{"{{"}}APISIX_DATA_ENCRYPTION_KEY_1{{"}}"}}"]`. Until
 [apache/apisix#14178](https://github.com/apache/apisix/issues/14178) is fixed in
-the APISIX version you run, use keys that are not made of digits only: APISIX
-turns such a value from an environment variable into a number and refuses to
-start.
+the APISIX version you run, use keys that do not look like a number, such as
+keys made of letters: APISIX turns a value from an environment variable that
+looks like a number into a number, whether it is quoted or not, and then
+refuses to start.
 
 The chart fails to render when the first key is one of the built-in keys. It
 cannot check keys in a Secret.
@@ -179,11 +180,23 @@ stored:
   ```
 
   New data is encrypted with the new key, and the existing data stays
-  readable. APISIX does not re-encrypt stored data by itself, so save each
-  resource that holds encrypted fields again through the Admin API, for
-  example each consumer with credentials: a GET returns the fields decrypted,
-  and a PUT of the same resource encrypts them with the first key. Remove the
-  built-in keys only after that.
+  readable. Data that is already stored stays encrypted with the built-in key
+  until it is saved again, and APISIX does not do that by itself. Save each
+  resource that configures a plugin with encrypted fields again through the
+  Admin API, for example each consumer and its credentials: a GET returns the
+  fields decrypted, and a PUT encrypts them with the first key. Remove the
+  `create_time` and `update_time` fields of the GET response first, because a
+  PUT rejects them. For a consumer:
+
+  ```shell
+  curl -s "http://127.0.0.1:9180/apisix/admin/consumers/$CONSUMER" -H "X-API-KEY: $ADMIN_KEY" |
+    jq '.value | del(.create_time, .update_time)' |
+    curl -s -X PUT http://127.0.0.1:9180/apisix/admin/consumers -H "X-API-KEY: $ADMIN_KEY" -d @-
+  ```
+
+  Keeping the built-in keys after the new key does not weaken it. Remove them
+  only after all data is saved again: APISIX cannot decrypt data that is still
+  encrypted with a key that is no longer in the keyring.
 - To rotate your own key, add the new key in front of the current one in the
   same way, then remove the old key after the data is re-encrypted.
 

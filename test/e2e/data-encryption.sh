@@ -111,10 +111,11 @@ admin_get_key() { # admin_get_key <consumer>: the key-auth key as the Admin API 
     yq -p json '.value.plugins."key-auth".key'
 }
 
-resave_consumer() { # resave_consumer <consumer>: PUT back what a GET returns, as the README describes
+resave_consumer() { # resave_consumer <consumer>: GET it and PUT it back without the
+  # create_time and update_time fields, which a PUT rejects, as the README describes
   local body
   body=$(curl -s "http://127.0.0.1:$ADMIN_PORT/apisix/admin/consumers/$1" -H "X-API-KEY: $ADMIN_KEY" |
-    yq -p json -o json -I0 '.value | {"username": .username, "plugins": .plugins}')
+    yq -p json -o json -I0 '.value | del(.create_time, .update_time)')
   created "$(admin_put /apisix/admin/consumers "$body")"
 }
 
