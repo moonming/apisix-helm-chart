@@ -144,10 +144,10 @@ rm -f "$values"
 check "fail: a keyring given as one string" fails_with "apisix.dataEncryption.keyring must be a list of keys" \
   --set apisix.dataEncryption.keyring="$NEW"
 check "fail: that error does not print the key" bash -c '! grep -qF "$2" <<<"$1"' _ "$ERR" "$NEW"
-check "fail: a key that is not 16 or 32 characters long" fails_with "entry 2 is 15 characters long" \
+check "fail: a key that is not 16 or 32 bytes long" fails_with "entry 2 is 15 bytes long" \
   --set-json "apisix.dataEncryption.keyring=[\"$NEW\",\"${NEW:0:15}\"]"
 check "fail: that error does not print the key" bash -c '! grep -qF "$2" <<<"$1"' _ "$ERR" "${NEW:0:15}"
-check "a 32-character key: renders" render --set-json "apisix.dataEncryption.keyring=[\"$NEW$NEW\"]"
+check "a 32-byte key: renders" render --set-json "apisix.dataEncryption.keyring=[\"$NEW$NEW\"]"
 check "fail: an inline keyring with fullCustomConfig" fails_with "apisix.dataEncryption.keyring is not used with apisix.fullCustomConfig" \
   --set apisix.fullCustomConfig.enabled=true --set-json "apisix.dataEncryption.keyring=[\"$NEW\"]"
 check "fail: keyring and secretName together" fails_with "set either keyring or secretName, not both" \

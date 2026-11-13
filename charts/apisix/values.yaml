@@ -414,7 +414,7 @@ apisix:
   dataEncryption:
     # -- Encrypt sensitive plugin fields before storing them in etcd. APISIX encrypts SSL private keys with the keyring either way
     enableEncryptFields: true
-    # -- Keys that encrypt and decrypt, each 16 or 32 characters long. APISIX encrypts with the first key and tries every key when decrypting. When this and `secretName` are both empty, APISIX uses its built-in keyring, which is public. Keys set here are stored in plain text in the APISIX ConfigMap; prefer `secretName`
+    # -- Keys that encrypt and decrypt, each 16 or 32 bytes long, for example ASCII letters. APISIX encrypts with the first key and tries every key when decrypting. When this and `secretName` are both empty, APISIX uses its built-in keyring, which is public. Keys set here are stored in plain text in the APISIX ConfigMap; prefer `secretName`
     keyring: []
     # -- Name of an existing Secret that holds the keyring. Use it instead of `keyring`
     secretName: ""

@@ -245,7 +245,7 @@ may follow it, so that data encrypted with them can still be decrypted.
 {{- fail (printf "apisix.dataEncryption.keyring: entry %d is not a string. Quote it, so that YAML keeps the key exactly as written" (add1 $index)) -}}
 {{- end -}}
 {{- if not (has (len $key) (list 16 32)) -}}
-{{- fail (printf "apisix.dataEncryption.keyring: entry %d is %d characters long; APISIX accepts keys of 16 or 32 characters" (add1 $index) (len $key)) -}}
+{{- fail (printf "apisix.dataEncryption.keyring: entry %d is %d bytes long; APISIX accepts keys of 16 or 32 bytes" (add1 $index) (len $key)) -}}
 {{- end -}}
 {{- end -}}
 {{- if and $encryption.keyring (has (first $encryption.keyring) (include "apisix.dataEncryption.publicKeys" . | fromJsonArray)) -}}

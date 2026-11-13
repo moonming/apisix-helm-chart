@@ -44,9 +44,24 @@ PF_PIDS=()
 NAMESPACES=()
 ADMIN_PORT=19180
 GATEWAY_PORT=19080
+TLS_PORT=19443
+WITH_TLS=""   # set to 1 while a release serves TLS, so that connect() forwards its port
+
+# self-signed certificates for two SSL objects; APISIX picks the object by its
+# snis, so the certificates need no subject alternative names
+CERTS=$(mktemp -d) || exit 2
+for host in tls.test stale-tls.test; do
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=$host" \
+    -keyout "$CERTS/$host.key" -out "$CERTS/$host.crt" >/dev/null 2>&1 || { echo "openssl req failed" >&2; exit 2; }
+done
+# the keys as they are sent and stored, without the newline that command
+# substitution strips anyway
+TLS_KEY=$(cat "$CERTS/tls.test.key")
+STALE_TLS_KEY=$(cat "$CERTS/stale-tls.test.key")
 
 cleanup() {
   stop_port_forwards
+  rm -rf "$CERTS"
   if [ "${KEEP_NAMESPACES:-}" != 1 ]; then
     for ns in "${NAMESPACES[@]:-}"; do
       [ -n "$ns" ] || continue
@@ -86,8 +101,40 @@ connect() { # connect <namespace>: port-forward the Admin API and the gateway of
   PF_PIDS+=($!)
   kubectl --namespace "$1" port-forward svc/apisix-gateway "$GATEWAY_PORT:80" >/dev/null 2>&1 &
   PF_PIDS+=($!)
+  if [ "$WITH_TLS" = 1 ]; then
+    kubectl --namespace "$1" port-forward svc/apisix-gateway "$TLS_PORT:443" >/dev/null 2>&1 &
+    PF_PIDS+=($!)
+  fi
   wait_for 60 curl -s -o /dev/null "http://127.0.0.1:$ADMIN_PORT/" &&
-    wait_for 60 curl -s -o /dev/null "http://127.0.0.1:$GATEWAY_PORT/"
+    wait_for 60 curl -s -o /dev/null "http://127.0.0.1:$GATEWAY_PORT/" &&
+    { [ "$WITH_TLS" != 1 ] || wait_for 60 tcp_open "$TLS_PORT"; }
+}
+
+tcp_open() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+add_ssl() { # add_ssl <id> <host>: an SSL object for that SNI, with the certificate from $CERTS
+  local body
+  body=$(CERT="$(cat "$CERTS/$2.crt")" KEY="$(cat "$CERTS/$2.key")" HOST="$2" \
+    yq -n -o json -I0 '.cert = strenv(CERT) | .key = strenv(KEY) | .snis = [strenv(HOST)]')
+  created "$(admin_put "/apisix/admin/ssls/$1" "$body")"
+}
+
+tls_code() { # tls_code <host>: status code of /e2e over TLS with that SNI, 000 when the handshake fails
+  curl -sk -o /dev/null -w '%{http_code}' --resolve "$1:$TLS_PORT:127.0.0.1" "https://$1:$TLS_PORT/e2e" -H "apikey: old-key"
+}
+tls_works() { [ "$(tls_code "$1")" != 000 ]; }
+serves_tls() { wait_for 30 tls_works "$1"; }   # serves_tls <host>
+tls_fails() { is "$(tls_code "$1")" 000; }      # check only after serves_tls on the same pods
+
+stored_ssl_key() { # stored_ssl_key <namespace> <id>: the private key of an SSL object as stored in etcd
+  kubectl --namespace "$1" exec apisix-etcd-0 -- etcdctl get "/apisix/ssls/$2" --print-value-only |
+    yq -p json '.key'
+}
+ssl_encrypted_with() { # ssl_encrypted_with <namespace> <id> <key> <PEM key>
+  local stored
+  stored=$(stored_ssl_key "$1" "$2")
+  case "$stored" in -----BEGIN*) echo "       stored in clear text" >&2; return 1 ;; esac
+  [ "$(decrypt "$3" "$stored")" = "$4" ] || { echo "       the stored key does not decrypt with that key" >&2; return 1; }
 }
 
 admin_put() { # admin_put <path> <json>: prints the status code
@@ -168,7 +215,8 @@ encrypted_with() { # encrypted_with <namespace> <consumer> <key> <plain text>
 # APISIX then uses the garbage it decrypts (see the README). Draw keys that do not
 # do that to the values this test stores, so that the test does not fail at random.
 while misreads "$KEY_2" "$KEY_1" jack-key || misreads "$KEY_1" "$BUILTIN_KEY" old-key ||
-      misreads "$KEY_1" "$BUILTIN_KEY" stale-key; do
+      misreads "$KEY_1" "$BUILTIN_KEY" stale-key || misreads "$KEY_1" "$BUILTIN_KEY" "$TLS_KEY" ||
+      misreads "$KEY_1" "$BUILTIN_KEY" "$STALE_TLS_KEY"; do
   KEY_1=$(random_letters 16)
   KEY_2=$(random_letters 16)
 done
@@ -214,30 +262,43 @@ check "rotation: the gateway accepts rose's key" accepts rose-key
 
 NS=de-migrate
 new_namespace "$NS"
-check "built-in: the release installs with the default values" install "$NS"
+WITH_TLS=1
+TLS=(--set apisix.ssl.enabled=true)
+check "built-in: the release installs with the default values" install "$NS" "${TLS[@]}"
 check "built-in: connected" connect "$NS"
 check "built-in: route created" add_route
 check "built-in: consumer old created" add_consumer old old-key
 check "built-in: consumer stale created" add_consumer stale stale-key
+check "built-in: SSL object for tls.test created" add_ssl 1 tls.test
+check "built-in: SSL object for stale-tls.test created" add_ssl 2 stale-tls.test
 check "built-in: by default the data is encrypted with the public built-in key" encrypted_with "$NS" old "$BUILTIN_KEY" old-key
+check "built-in: and so is the SSL private key" ssl_encrypted_with "$NS" 1 "$BUILTIN_KEY" "$TLS_KEY"
+check "built-in: TLS works" serves_tls tls.test
 OLD_BODY=$(consumer_body old)
 check "built-in: the body saved before the change holds the decrypted key" holds_key "$OLD_BODY" old-key
 
 check "migration: the upgrade with a new key first and the built-in key after it succeeds" \
-  upgrade "$NS" --set-json "apisix.dataEncryption.keyring=[\"$KEY_1\",\"$BUILTIN_KEY\"]"
+  upgrade "$NS" "${TLS[@]}" --set-json "apisix.dataEncryption.keyring=[\"$KEY_1\",\"$BUILTIN_KEY\"]"
 check "migration: connected to the new pods" connect "$NS"
 check "migration: the old consumers still work" accepts old-key
 check "migration: the old consumers still work (stale)" accepts stale-key
+check "migration: TLS still works for tls.test" serves_tls tls.test
+check "migration: and for stale-tls.test" serves_tls stale-tls.test
 check "migration: consumer old saved again from the body saved before the change" put_consumer "$OLD_BODY"
 check "migration: old is now encrypted with the new key" encrypted_with "$NS" old "$KEY_1" old-key
+check "migration: the SSL object for tls.test uploaded again with its PEM key" add_ssl 1 tls.test
+check "migration: its private key is now encrypted with the new key" ssl_encrypted_with "$NS" 1 "$KEY_1" "$TLS_KEY"
 check "migration: consumer new created" add_consumer new new-key
 check "migration: new data is encrypted with the new key" encrypted_with "$NS" new "$KEY_1" new-key
 
-check "dropping the built-in key: the upgrade succeeds" upgrade "$NS" --set-json "apisix.dataEncryption.keyring=[\"$KEY_1\"]"
+check "dropping the built-in key: the upgrade succeeds" upgrade "$NS" "${TLS[@]}" --set-json "apisix.dataEncryption.keyring=[\"$KEY_1\"]"
 check "dropping the built-in key: connected to the new pods" connect "$NS"
 check "dropping the built-in key: data encrypted with the new key works" accepts new-key
 check "dropping the built-in key: data saved again works" accepts old-key
+check "dropping the built-in key: TLS works for the SSL object uploaded again" serves_tls tls.test
 check "dropping the built-in key: data not saved again can no longer be read" rejects stale-key
+check "dropping the built-in key: TLS fails for the SSL object not uploaded again" tls_fails stale-tls.test
+WITH_TLS=""
 
 echo
 echo "passed: $passed, failed: $failed"
